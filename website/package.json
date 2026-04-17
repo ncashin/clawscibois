@@ -1,0 +1,28 @@
+{
+  "name": "website",
+  "module": "src/server.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/input.css -o ./dist/tailwind.css",
+    "build": "bun run build:css",
+    "start": "bun src/server.tsx",
+    "dev": "bun run build:css && concurrently -k \"bun --watch src/server.tsx\" \"tailwindcss -i ./src/input.css -o ./dist/tailwind.css --watch\"",
+    "postinstall": "bun run build:css"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.2.2",
+    "@types/bun": "latest",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "tailwindcss": "^4.2.2"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  }
+}

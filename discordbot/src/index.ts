@@ -1,0 +1,143 @@
+import { createMemoryState } from "@chat-adapter/state-memory";
+import { createDiscordAdapter } from "@chat-adapter/discord";
+import { Chat, type Thread } from "chat";
+import { formatDiscordReply } from "./formatDiscordReply.ts";
+import {
+  createSession,
+  health,
+  loadOpenCodeConfigFromEnv,
+  sendUserMessage,
+  type OpenCodeConfig,
+} from "./opencode.ts";
+
+const opencode: OpenCodeConfig = loadOpenCodeConfigFromEnv();
+const sessionByThread = new Map<string, string>();
+
+function createDiscordAdapterFromEnvironment() {
+  const botToken = process.env.DISCORD_BOT_TOKEN?.trim();
+  const publicKey = process.env.DISCORD_PUBLIC_KEY?.trim();
+  const applicationId = process.env.DISCORD_APPLICATION_ID?.trim();
+  if (!botToken || !publicKey || !applicationId) {
+    const missing = [
+      !botToken && "DISCORD_BOT_TOKEN",
+      !publicKey && "DISCORD_PUBLIC_KEY",
+      !applicationId && "DISCORD_APPLICATION_ID",
+    ].filter(Boolean);
+    console.error(
+      `Missing required environment variables: ${missing.join(", ")}. ` +
+        "Add them to a .env file at the repo root (see .env.example) and run Compose from that directory.",
+    );
+    process.exit(1);
+  }
+  return createDiscordAdapter({
+    botToken,
+    publicKey,
+    applicationId,
+    userName: process.env.DISCORD_BOT_USERNAME ?? "opencode",
+  });
+}
+
+async function sessionForThread(threadId: string): Promise<string> {
+  let id = sessionByThread.get(threadId);
+  if (!id) {
+    id = await createSession(opencode, `discord:${threadId}`);
+    sessionByThread.set(threadId, id);
+  }
+  return id;
+}
+
+const chat = new Chat({
+  userName: process.env.DISCORD_BOT_USERNAME ?? "slopscibois",
+  adapters: {
+    discord: createDiscordAdapterFromEnvironment(),
+  },
+  state: createMemoryState(),
+});
+
+async function handlePrompt(thread: Thread, text: string): Promise<void> {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  const status = await thread.post("On it boss...");
+  try {
+    const sid = await sessionForThread(thread.id);
+    const reply = await sendUserMessage(opencode, sid, trimmed);
+    const formatted = reply ? formatDiscordReply(reply) : "";
+    await status.edit(formatted || "(OpenCode returned an empty reply.)");
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    await status.edit(`Error: ${errorMessage}`);
+  }
+}
+
+chat.onNewMention(async (thread, message) => {
+  if (message.author.isMe || message.author.isBot) return;
+  await thread.subscribe();
+  await handlePrompt(thread, message.text);
+});
+
+chat.onSubscribedMessage(async (thread, message) => {
+  if (message.author.isMe || message.author.isBot) return;
+  await handlePrompt(thread, message.text);
+});
+
+function runGatewayLoop(): void {
+  void (async () => {
+    const discord = chat.getAdapter("discord");
+    const sessionMilliseconds = 6 * 60 * 60 * 1000;
+    for (;;) {
+      console.log("[discord] gateway listener starting");
+      let gatewayTask: Promise<unknown> | undefined;
+      await discord.startGatewayListener(
+        {
+          waitUntil: (task: Promise<unknown>) => {
+            gatewayTask = task;
+            void task.catch((event: unknown) =>
+              console.error("[discord] gateway task:", event),
+            );
+          },
+        },
+        sessionMilliseconds,
+        undefined,
+        undefined,
+      );
+      if (gatewayTask) {
+        await gatewayTask;
+      }
+      console.log("[discord] gateway listener stopped; reconnecting");
+    }
+  })();
+}
+
+await chat.initialize();
+await health(opencode);
+
+const port = Number(process.env.PORT ?? 3001);
+
+Bun.serve({
+  port,
+  hostname: "0.0.0.0",
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/api/webhooks/discord") {
+      return chat.webhooks.discord(req, {
+        waitUntil: (task: Promise<unknown>) => {
+          void task.catch((event: unknown) =>
+            console.error("[discord] webhook task:", event),
+          );
+        },
+      });
+    }
+    if (url.pathname === "/health") {
+      return new Response("ok");
+    }
+    return new Response("Not found", { status: 404 });
+  },
+});
+
+runGatewayLoop();
+
+console.log(
+  `Discord interactions: http://0.0.0.0:${port}/api/webhooks/discord`,
+);
