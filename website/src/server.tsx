@@ -13,7 +13,7 @@ function htmlDocument(body: string, css: string) {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>website</title>
+    <title>compscibois</title>
     <style>${css}</style>
   </head>
   <body>${body}</body>
