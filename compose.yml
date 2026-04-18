@@ -10,7 +10,7 @@ services:
       - "3001:3001"
       - "4096:4096"
     volumes:
-      - .:/workspace
+      - ./volumes/clawscibois_data:/workspace
     env_file:
       - path: .env
         required: false
