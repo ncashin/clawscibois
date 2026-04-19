@@ -67,13 +67,19 @@ export class ManagedProcess {
       clearTimeout(this.restartHandle);
       this.restartHandle = null;
     }
-    this.expectedExit = true;
+    // Only flag the exit as expected if there's actually a process to kill.
+    // Otherwise the flag would leak into a future spawn's handleExit and
+    // suppress its crash count (causing the supervisor to zombie the
+    // process: running: false, bricked: false, crashesInWindow: 0, forever).
+    if (this.proc) this.expectedExit = true;
     await this.killRunningProc();
   }
 
   async restart(): Promise<void> {
     if (this.stopped) return;
-    this.expectedExit = true;
+    // See the note in stop(): never set expectedExit unless a kill is
+    // actually going to happen.
+    if (this.proc) this.expectedExit = true;
     await this.killRunningProc();
     this.start();
   }
