@@ -2,7 +2,22 @@ export type OpenCodeConfig = {
   baseUrl: string;
   username?: string;
   password?: string;
+  requestTimeoutMs?: number;
 };
+
+function log(
+  scope: string,
+  msg: string,
+  extra?: Record<string, unknown>,
+): void {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    scope: `discordbot:${scope}`,
+    msg,
+    ...(extra ?? {}),
+  });
+  console.log(line);
+}
 
 function authHeader(config: OpenCodeConfig): Record<string, string> {
   if (!config.password) return {};
@@ -51,14 +66,37 @@ export async function createSession(
   config: OpenCodeConfig,
   title?: string,
 ): Promise<string> {
+  const startedAt = Date.now();
+  log("opencode", "createSession: request", { title });
   const response = await fetch(new URL("/session", config.baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json", ...authHeader(config) },
     body: JSON.stringify(title ? { title } : {}),
   });
-  if (!response.ok) throw new Error(await readError(response));
+  const durationMs = Date.now() - startedAt;
+  if (!response.ok) {
+    const errorText = await readError(response);
+    log("opencode", "createSession: non-2xx", {
+      title,
+      durationMs,
+      status: response.status,
+      errorText,
+    });
+    throw new Error(errorText);
+  }
   const data = (await response.json()) as { id: string };
-  if (!data?.id) throw new Error("OpenCode: create session returned no id");
+  if (!data?.id) {
+    log("opencode", "createSession: response had no id", {
+      title,
+      durationMs,
+    });
+    throw new Error("OpenCode: create session returned no id");
+  }
+  log("opencode", "createSession: response", {
+    title,
+    durationMs,
+    sessionId: data.id,
+  });
   return data.id;
 }
 
@@ -88,16 +126,67 @@ export async function sendUserMessage(
   const body = {
     parts: [{ type: "text", text }],
   };
-  const response = await fetch(
-    new URL(`/session/${encodeURIComponent(sessionId)}/message`, config.baseUrl),
-    {
+  const url = new URL(
+    `/session/${encodeURIComponent(sessionId)}/message`,
+    config.baseUrl,
+  );
+  const timeoutMs = config.requestTimeoutMs ?? 180_000;
+  const startedAt = Date.now();
+
+  log("opencode", "sendUserMessage: request", {
+    sessionId,
+    url: url.toString(),
+    promptLength: text.length,
+    timeoutMs,
+  });
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeader(config) },
       body: JSON.stringify(body),
-    },
-  );
-  if (!response.ok) throw new Error(await readError(response));
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    const isTimeout =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError");
+    log("opencode", "sendUserMessage: fetch failed", {
+      sessionId,
+      durationMs,
+      timeout: isTimeout,
+      errorName: error instanceof Error ? error.name : undefined,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    if (isTimeout) {
+      throw new Error(
+        `OpenCode request timed out after ${timeoutMs}ms (session ${sessionId})`,
+      );
+    }
+    throw error;
+  }
+
+  const durationMs = Date.now() - startedAt;
+  if (!response.ok) {
+    const errorText = await readError(response);
+    log("opencode", "sendUserMessage: non-2xx", {
+      sessionId,
+      durationMs,
+      status: response.status,
+      errorText,
+    });
+    throw new Error(errorText);
+  }
   const responseText = await response.text();
+  log("opencode", "sendUserMessage: response", {
+    sessionId,
+    durationMs,
+    status: response.status,
+    bodyLength: responseText.length,
+  });
+
   if (!responseText) {
     return "";
   }
@@ -122,9 +211,17 @@ export function loadOpenCodeConfigFromEnv(): OpenCodeConfig {
   if (!baseUrl) {
     throw new Error("OPENCODE_URL is required (e.g. http://opencode:4096)");
   }
+  const rawTimeout = process.env.OPENCODE_REQUEST_TIMEOUT_MS?.trim();
+  const requestTimeoutMs = rawTimeout
+    ? Number.parseInt(rawTimeout, 10)
+    : undefined;
   return {
     baseUrl,
     username: process.env.OPENCODE_SERVER_USERNAME,
     password: process.env.OPENCODE_SERVER_PASSWORD,
+    requestTimeoutMs:
+      requestTimeoutMs && Number.isFinite(requestTimeoutMs)
+        ? requestTimeoutMs
+        : undefined,
   };
 }

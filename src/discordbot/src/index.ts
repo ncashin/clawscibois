@@ -13,6 +13,20 @@ import {
 const opencode: OpenCodeConfig = loadOpenCodeConfigFromEnv();
 const sessionByThread = new Map<string, string>();
 
+function log(
+  scope: string,
+  msg: string,
+  extra?: Record<string, unknown>,
+): void {
+  const line = JSON.stringify({
+    ts: new Date().toISOString(),
+    scope: `discordbot:${scope}`,
+    msg,
+    ...(extra ?? {}),
+  });
+  console.log(line);
+}
+
 function createDiscordAdapterFromEnvironment() {
   const botToken = process.env.DISCORD_BOT_TOKEN?.trim();
   const publicKey = process.env.DISCORD_PUBLIC_KEY?.trim();
@@ -38,11 +52,17 @@ function createDiscordAdapterFromEnvironment() {
 }
 
 async function sessionForThread(threadId: string): Promise<string> {
-  let id = sessionByThread.get(threadId);
-  if (!id) {
-    id = await createSession(opencode, `discord:${threadId}`);
-    sessionByThread.set(threadId, id);
+  const existing = sessionByThread.get(threadId);
+  if (existing) {
+    log("session", "reusing existing session", {
+      threadId,
+      sessionId: existing,
+    });
+    return existing;
   }
+  log("session", "creating new session", { threadId });
+  const id = await createSession(opencode, `discord:${threadId}`);
+  sessionByThread.set(threadId, id);
   return id;
 }
 
@@ -58,27 +78,64 @@ async function handlePrompt(thread: Thread, text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
 
+  const startedAt = Date.now();
+  log("prompt", "received", {
+    threadId: thread.id,
+    promptLength: trimmed.length,
+    promptPreview: trimmed.slice(0, 80),
+  });
+
   const status = await thread.post("On it boss...");
   try {
     const sid = await sessionForThread(thread.id);
     const reply = await sendUserMessage(opencode, sid, trimmed);
     const formatted = reply ? formatDiscordReply(reply) : "";
+    const totalMs = Date.now() - startedAt;
+    log("prompt", "replied", {
+      threadId: thread.id,
+      sessionId: sid,
+      replyLength: formatted.length,
+      totalMs,
+    });
     await status.edit(formatted || "(OpenCode returned an empty reply.)");
   } catch (error) {
+    const totalMs = Date.now() - startedAt;
     const errorMessage =
       error instanceof Error ? error.message : String(error);
+    log("prompt", "failed", {
+      threadId: thread.id,
+      totalMs,
+      errorName: error instanceof Error ? error.name : undefined,
+      errorMessage,
+    });
     await status.edit(`Error: ${errorMessage}`);
   }
 }
 
 chat.onNewMention(async (thread, message) => {
-  if (message.author.isMe || message.author.isBot) return;
+  if (message.author.isMe || message.author.isBot) {
+    log("event", "onNewMention: ignoring self/bot", { threadId: thread.id });
+    return;
+  }
+  log("event", "onNewMention: subscribing + handling", {
+    threadId: thread.id,
+    authorId: message.author.id,
+  });
   await thread.subscribe();
   await handlePrompt(thread, message.text);
 });
 
 chat.onSubscribedMessage(async (thread, message) => {
-  if (message.author.isMe || message.author.isBot) return;
+  if (message.author.isMe || message.author.isBot) {
+    log("event", "onSubscribedMessage: ignoring self/bot", {
+      threadId: thread.id,
+    });
+    return;
+  }
+  log("event", "onSubscribedMessage: handling", {
+    threadId: thread.id,
+    authorId: message.author.id,
+  });
   await handlePrompt(thread, message.text);
 });
 
