@@ -1,0 +1,29 @@
+<!-- @@agent-editable-below -->
+
+# clawscibois — project guide
+
+This is the agent-editable doc. The rules section above is regenerated
+from `infra/AGENTS.md` on every container boot; nothing you write there
+will persist. Everything below this line is yours to edit.
+
+## What this app is
+
+A Discord bot (`src/discordbot/`) and a React SSR website (`src/website/`).
+The bot forwards user messages to you via HTTP and posts your responses
+back to Discord.
+
+## File map
+
+- `src/website/src/server.tsx` — the SSR entry point.
+- `src/website/src/App.tsx` — the root React component.
+- `src/discordbot/src/index.ts` — the bot entry point.
+- `src/discordbot/src/opencode.ts` — the HTTP client the bot uses
+  to talk to you.
+
+## Conventions
+
+(Grow this section over time. Initial content is minimal.)
+
+## Gotchas
+
+(Record anything surprising you learn about this codebase here.)
