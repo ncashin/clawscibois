@@ -1,4 +1,12 @@
 node_modules
 dist
 .git
+.github
+.vscode
 volumes/
+docs/
+README.md
+.env
+.env.*
+!.env.example
+*.log
