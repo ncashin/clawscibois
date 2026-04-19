@@ -65,7 +65,9 @@ const opencode = new ManagedProcess({
 
 const website = new ManagedProcess({
   name: "website",
-  cmd: ["bun", "run", "src/server.tsx"],
+  // Build CSS, then exec the SSR server. `exec` replaces the shell so
+  // signals still reach the server directly.
+  cmd: ["bash", "-c", "bun run build:css && exec bun run src/server.tsx"],
   cwd: cfg.websiteDir,
   env: {
     WEBSITE_PORT: String(cfg.websitePort),
