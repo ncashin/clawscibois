@@ -1,4 +1,4 @@
-FROM oven/bun:1-alpine
+FROM oven/bun:1
 
 COPY --from=ghcr.io/anomalyco/opencode:latest /usr/local/bin/opencode /usr/local/bin/opencode
 
