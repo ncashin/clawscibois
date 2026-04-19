@@ -12,6 +12,7 @@ import {
   getGoodRef,
   getHeadSha,
   hardResetTo,
+  untrackPath,
   updateGoodRef,
 } from "./git.ts";
 
@@ -41,6 +42,18 @@ log("boot", "supervisor starting", { cfg });
 
 await ensureWorkspaceRepo(cfg.workspaceDir);
 log("boot", "workspace git repo ready");
+
+// Self-heal: if a prior image tracked `infra/` (which is root-owned),
+// stop tracking it now so future reverts don't fail on unlink permission
+// errors when HEAD crosses commits that changed those files.
+const prunedInfra = await untrackPath(
+  cfg.workspaceDir,
+  "infra",
+  SUPERVISOR_AUTHOR,
+);
+if (prunedInfra) {
+  log("git", "stopped tracking infra/ (self-heal)");
+}
 
 // Processes ---------------------------------------------------------------
 
