@@ -25,7 +25,8 @@ export function createDebouncedBatcher<T>(
     if (pending.length === 0) return;
     const batch = pending;
     pending = [];
-    const p = (async () => {
+    let p!: Promise<void>;
+    p = (async () => {
       try {
         await onFlush(batch);
       } catch (err) {

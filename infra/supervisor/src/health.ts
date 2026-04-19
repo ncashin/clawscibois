@@ -33,7 +33,7 @@ export function startHealthServer(opts: {
     },
   });
   return {
-    port: server.port,
+    port: server.port!,
     stop: () => server.stop(true),
   };
 }

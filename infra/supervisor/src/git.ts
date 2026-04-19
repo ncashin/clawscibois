@@ -53,11 +53,13 @@ export async function getHeadSha(dir: string): Promise<string | null> {
 
 export async function commitAll(
   dir: string,
-  opts: { author: Author; message: string },
+  opts: { author: Author; message: string; allowEmpty?: boolean },
 ): Promise<string | null> {
   await runOrThrow(dir, ["add", "-A"]);
-  const status = await runOrThrow(dir, ["status", "--porcelain"]);
-  if (status === "") return null;
+  if (!opts.allowEmpty) {
+    const status = await runOrThrow(dir, ["status", "--porcelain"]);
+    if (status === "") return null;
+  }
 
   const env = {
     GIT_AUTHOR_NAME: opts.author.name,
@@ -65,7 +67,10 @@ export async function commitAll(
     GIT_COMMITTER_NAME: opts.author.name,
     GIT_COMMITTER_EMAIL: opts.author.email,
   };
-  await runOrThrow(dir, ["commit", "-m", opts.message], env);
+  const commitArgs = opts.allowEmpty
+    ? ["commit", "--allow-empty", "-m", opts.message]
+    : ["commit", "-m", opts.message];
+  await runOrThrow(dir, commitArgs, env);
   return getHeadSha(dir);
 }
 
