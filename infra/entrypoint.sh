@@ -13,8 +13,8 @@ fi
 
 cd "$PROJECT"
 
-(cd "$PROJECT/website" && bun install --ignore-scripts)
-(cd "$PROJECT/discordbot" && bun install)
+(cd "$PROJECT/src/website" && bun install --ignore-scripts)
+(cd "$PROJECT/src/discordbot" && bun install)
 
 OPENCODE_PORT="${OPENCODE_SERVE_PORT:-4096}"
 OPENCODE_HOST="${OPENCODE_SERVE_HOSTNAME:-0.0.0.0}"
@@ -29,7 +29,7 @@ opencode serve \
 opencode_pid=$!
 
 DISCORD_PORT="${DISCORD_BOT_PORT:-3001}"
-(cd "$PROJECT/discordbot" && PORT="$DISCORD_PORT" bun --hot run src/index.ts) &
+(cd "$PROJECT/src/discordbot" && PORT="$DISCORD_PORT" bun --hot run src/index.ts) &
 discord_pid=$!
 
 cleanup() {
@@ -45,5 +45,5 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 sleep 1
-cd "$PROJECT/website"
+cd "$PROJECT/src/website"
 bun run dev
