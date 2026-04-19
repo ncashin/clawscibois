@@ -44,9 +44,11 @@ RUN (cd src/website && bun install --frozen-lockfile --ignore-scripts) \
 
 WORKDIR /workspace
 
-# Expose only what external callers need. 4096 (opencode) is intentionally
-# NOT exposed — it stays on 127.0.0.1 inside the container.
-EXPOSE 3000 3001
+# :4096 (opencode) is exposed so a reverse proxy can route to it.
+# Exposure is conditional on OPENCODE_SERVER_PASSWORD being set — the
+# supervisor refuses to launch opencode without a password (fail-closed),
+# so an unsecured port is never reachable.
+EXPOSE 3000 3001 4096
 
 ENV PORT=3000
 ENV WORKSPACE=/workspace

@@ -1,5 +1,5 @@
 import { loadConfig } from "./config.ts";
-import { ManagedProcess } from "./managedProcess.ts";
+import { ManagedProcess, type ProcessState } from "./managedProcess.ts";
 import { startHealthServer, type SupervisorSnapshot } from "./health.ts";
 import {
   createDebouncedBatcher,
@@ -44,24 +44,64 @@ log("boot", "workspace git repo ready");
 
 // Processes ---------------------------------------------------------------
 
-const opencode = new ManagedProcess({
-  name: "opencode",
-  cmd: [
-    "opencode",
-    "serve",
-    "--hostname",
-    "127.0.0.1",
-    "--port",
-    String(cfg.opencodePort),
-    "--cors",
-    `http://localhost:${cfg.websitePort}`,
-    cfg.workspaceDir,
-  ],
-  cwd: cfg.workspaceDir,
-  env: {},
-  crashWindowMs: cfg.crashWindowMs,
-  crashThreshold: cfg.crashThreshold,
-});
+// OpenCode is fail-closed: we refuse to start it without a password.
+// Rationale: the serve port is exposed beyond localhost (so Traefik can
+// route to it). An unauthenticated server on a public hostname would be
+// a backdoor into the agent sandbox. We'd rather degrade — bot + website
+// keep working, opencode-dependent paths error clearly — than silently
+// run an open door.
+const opencodePassword = process.env.OPENCODE_SERVER_PASSWORD?.trim() ?? "";
+const opencodeUsername =
+  process.env.OPENCODE_SERVER_USERNAME?.trim() || "opencode";
+const opencodeCors =
+  process.env.OPENCODE_CORS?.trim() ||
+  `http://localhost:${cfg.websitePort}`;
+
+let opencode: ManagedProcess | null = null;
+if (opencodePassword) {
+  opencode = new ManagedProcess({
+    name: "opencode",
+    cmd: [
+      "opencode",
+      "serve",
+      "--hostname",
+      "0.0.0.0",
+      "--port",
+      String(cfg.opencodePort),
+      "--cors",
+      opencodeCors,
+      cfg.workspaceDir,
+    ],
+    cwd: cfg.workspaceDir,
+    env: {
+      OPENCODE_SERVER_PASSWORD: opencodePassword,
+      OPENCODE_SERVER_USERNAME: opencodeUsername,
+    },
+    crashWindowMs: cfg.crashWindowMs,
+    crashThreshold: cfg.crashThreshold,
+  });
+} else {
+  log("opencode", "refusing to start; OPENCODE_SERVER_PASSWORD is unset", {
+    hint: "set OPENCODE_SERVER_PASSWORD in the environment and restart",
+  });
+}
+
+// Synthetic state for snapshot() when opencode is intentionally absent.
+// Marked `bricked: true` so supervisor health reports ok:false — that
+// matters for the HEALTHCHECK and for surface visibility: a
+// misconfigured deploy should look unhealthy, not "working but lying".
+function opencodeState(): ProcessState {
+  if (opencode) return opencode.state();
+  return {
+    name: "opencode",
+    running: false,
+    bricked: true,
+    crashesInWindow: 0,
+    lastExitCode: null,
+    lastExitAt: null,
+    startedAt: null,
+  };
+}
 
 const website = new ManagedProcess({
   name: "website",
@@ -99,7 +139,7 @@ let recoveryHalted = false;
 let consecutiveFailedReverts = 0;
 
 function snapshot(): SupervisorSnapshot {
-  const states = [opencode.state(), website.state(), discordbot.state()];
+  const states = [opencodeState(), website.state(), discordbot.state()];
   const anyBricked = states.some((s) => s.bricked);
   return {
     ok: !recoveryHalted && !anyBricked,
@@ -166,7 +206,7 @@ log("boot", "file watchers armed");
 
 // Start children ----------------------------------------------------------
 
-opencode.start();
+opencode?.start();
 website.start();
 discordbot.start();
 
@@ -262,7 +302,11 @@ async function shutdown(sig: string): Promise<void> {
   commitBatcher.close();
   restartBatcher.close();
   await Promise.all(watchers.map((w) => w.close()));
-  await Promise.all([opencode.stop(), website.stop(), discordbot.stop()]);
+  await Promise.all([
+    opencode?.stop() ?? Promise.resolve(),
+    website.stop(),
+    discordbot.stop(),
+  ]);
   healthSrv.stop();
   process.exit(0);
 }
