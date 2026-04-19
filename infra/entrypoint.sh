@@ -64,8 +64,13 @@ if [ "$(id -u)" -eq 0 ]; then
   chmod 755 "$ROOT"
 
   chown -R app:agent "$ROOT/src"
-  find "$ROOT/src" -type d -exec chmod 2775 {} +
-  find "$ROOT/src" -type f -exec chmod 664 {} +
+  # Prune node_modules from the permission walk: their perms come from
+  # `bun install` (executable bits on .bin/*, etc.) and we don't want to
+  # clobber them. `find -prune` applies BEFORE further descent.
+  find "$ROOT/src" -name node_modules -prune -o \
+       \( -type d -exec chmod 2775 {} + \)
+  find "$ROOT/src" -name node_modules -prune -o \
+       \( -type f -exec chmod 664 {} + \)
 
   chown app:agent "$ROOT/AGENTS.md"
   chmod 664 "$ROOT/AGENTS.md"
