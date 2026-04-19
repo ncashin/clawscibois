@@ -10,7 +10,11 @@ services:
       - "${DISCORD_BOT_PORT:-3001}:${DISCORD_BOT_PORT:-3001}"
     restart: unless-stopped
     volumes:
-      - ../volumes/clawscibois_data:/workspace
+      # Use a Docker-managed named volume (ext4 inside the VM) rather than a
+      # host bind mount. Bind mounts on macOS go through grpcfuse which does
+      # not enforce Linux uid/perm semantics the way we need for the agent
+      # sandbox (root-owned 755 dirs become writable by non-root users).
+      - clawscibois_workspace:/workspace
     env_file:
       - path: ../.env
         required: false
@@ -20,3 +24,7 @@ services:
       OPENCODE_URL: "http://127.0.0.1:4096"
       OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
       OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+
+volumes:
+  clawscibois_workspace:
+    name: clawscibois_workspace

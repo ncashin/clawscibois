@@ -1,11 +1,16 @@
 FROM oven/bun:1
 
-# Required tools: git for the workspace repo; setpriv/su for priv drop;
-# curl for HEALTHCHECK.
+# Required tools: git for the workspace repo; util-linux for setpriv/su;
+# curl for HEALTHCHECK and the opencode installer; ca-certificates for
+# TLS validation; rsync for fast seed copies; tar because the opencode
+# installer extracts a tarball.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       util-linux \
       curl \
+      ca-certificates \
+      rsync \
+      tar \
     && rm -rf /var/lib/apt/lists/*
 
 # Two users: app (runs processes), agent (runs opencode + its tools).
@@ -17,7 +22,16 @@ RUN groupadd -g 1001 agent \
  && groupmod -n app bun \
  && usermod -l app -d /home/app -m -s /bin/bash -G agent bun
 
-COPY --from=ghcr.io/anomalyco/opencode:latest /usr/local/bin/opencode /usr/local/bin/opencode
+# Install opencode via the official installer. The GHCR image
+# (ghcr.io/anomalyco/opencode:latest) ships a musl-linked binary intended
+# for alpine; copying it into a debian-based image fails with
+# `libc.musl-*.so.1 => not found`. The installer picks the correct
+# glibc-linked build for the current arch.
+RUN curl -fsSL https://opencode.ai/install | \
+    bash -s -- --no-modify-path \
+ && cp /root/.opencode/bin/opencode /usr/local/bin/opencode \
+ && chmod 755 /usr/local/bin/opencode \
+ && rm -rf /root/.opencode
 
 WORKDIR /opt/workspace-seed
 COPY . .

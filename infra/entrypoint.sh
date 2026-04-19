@@ -12,12 +12,16 @@ log() { printf '%s [entrypoint] %s\n' "$(date -Iseconds)" "$*"; }
 if [ ! -f "$ROOT/.workspace-seed" ]; then
   log "seeding $ROOT from $SEED"
   mkdir -p "$ROOT"
-  # Copy only the files we want the agent (and the running processes) to see.
-  cp -a "$SEED/src" "$ROOT/src"
+  # Copy source trees WITHOUT their node_modules / dist — those are heavy,
+  # vary per-machine, and should not end up in the workspace git repo.
+  rsync -a --exclude='node_modules' --exclude='dist' "$SEED/src/" "$ROOT/src/"
+  # Place the immutable rules doc inside the workspace so OpenCode sessions
+  # can read it. Everything else infra-related (entrypoint, supervisor) runs
+  # from /opt/workspace-seed and is NOT copied into the workspace volume —
+  # keeps the agent surface minimal and lets us update infra via image rebuild.
   mkdir -p "$ROOT/infra"
   cp -a "$SEED/infra/AGENTS.md" "$ROOT/infra/AGENTS.md"
-  cp -a "$SEED/infra/supervisor" "$ROOT/infra/supervisor"
-  cp -a "$SEED/infra/entrypoint.sh" "$ROOT/infra/entrypoint.sh"
+  cp -a "$SEED/infra/workspace.gitignore" "$ROOT/.gitignore"
   touch "$ROOT/.workspace-seed"
 fi
 
@@ -54,7 +58,6 @@ if [ "$(id -u)" -eq 0 ]; then
   chown -R root:root "$ROOT/infra"
   chmod 755 "$ROOT/infra"
   chmod 644 "$ROOT/infra/AGENTS.md"
-  chmod 755 "$ROOT/infra/entrypoint.sh"
 
   # src/ and AGENTS.md: app:agent, group-writable + setgid on dirs.
   chown app:app "$ROOT"
@@ -66,6 +69,13 @@ if [ "$(id -u)" -eq 0 ]; then
 
   chown app:agent "$ROOT/AGENTS.md"
   chmod 664 "$ROOT/AGENTS.md"
+
+  # Workspace .gitignore: owned by app:app and read-only to the agent so
+  # the agent can't quietly un-ignore node_modules and bloat the repo.
+  if [ -f "$ROOT/.gitignore" ]; then
+    chown app:app "$ROOT/.gitignore"
+    chmod 644 "$ROOT/.gitignore"
+  fi
 
   # .opencode: agent-owned scratch
   mkdir -p "$ROOT/.opencode"
@@ -92,14 +102,13 @@ if [ ! -d "$ROOT/src/discordbot/node_modules" ]; then
   log "installing discordbot deps"
   (cd "$ROOT/src/discordbot" && su -s /bin/bash -c "bun install" app)
 fi
-if [ ! -d "$ROOT/infra/supervisor/node_modules" ]; then
-  log "installing supervisor deps"
-  (cd "$ROOT/infra/supervisor" && su -s /bin/bash -c "bun install" app)
-fi
+
+# Supervisor deps live in the image (pre-installed by Dockerfile into
+# /opt/workspace-seed/infra/supervisor/node_modules), not in the workspace.
 
 # -----------------------------------------------------------------------
 # 5. Drop privs and exec the supervisor
 # -----------------------------------------------------------------------
 log "handing off to supervisor as user app"
 cd "$ROOT"
-exec su -s /bin/bash -c "cd $ROOT/infra/supervisor && exec bun run src/index.ts" app
+exec su -s /bin/bash -c "cd $SEED/infra/supervisor && exec bun run src/index.ts" app
