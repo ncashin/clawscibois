@@ -3,3 +3,10 @@ dist/
 *.log
 .cache/
 .DS_Store
+
+# infra/ is root-owned and read-only to the agent. Tracking it in the
+# workspace git repo causes `git reset --hard` to fail when HEAD -> good
+# would require modifying those files: `app` can't unlink files owned by
+# root, so recovery breaks. We exclude it entirely and let it live as
+# untracked, unmodifiable content.
+infra/

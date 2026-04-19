@@ -9,6 +9,7 @@ import {
   hardResetTo,
   updateGoodRef,
   getGoodRef,
+  untrackPath,
 } from "./git.ts";
 
 let dir: string;
@@ -90,5 +91,46 @@ describe("good ref", () => {
     await ensureWorkspaceRepo(dir);
     const got = await getGoodRef(dir);
     expect(got).toBeNull();
+  });
+});
+
+describe("untrackPath", () => {
+  const supervisorAuthor = {
+    name: "supervisor",
+    email: "supervisor@clawscibois.local",
+  };
+
+  test("removes a tracked path from the index and commits", async () => {
+    await ensureWorkspaceRepo(dir);
+    mkdirSync(join(dir, "infra"));
+    writeFileSync(join(dir, "infra", "rules.md"), "DO NOT TOUCH");
+    await commitAll(dir, {
+      author: { name: "agent", email: "agent@clawscibois.local" },
+      message: "adds infra",
+    });
+
+    const pruned = await untrackPath(dir, "infra", supervisorAuthor);
+    expect(pruned).toBe(true);
+
+    // Working tree file should still exist; just untracked now.
+    expect(
+      await Bun.file(join(dir, "infra", "rules.md")).exists(),
+    ).toBe(true);
+
+    // And a new commit records the removal.
+    const lsAfter = await Bun.spawn(["git", "-C", dir, "ls-files", "infra"], {
+      stdout: "pipe",
+    });
+    const lsText = await new Response(lsAfter.stdout).text();
+    expect(lsText.trim()).toBe("");
+  });
+
+  test("is a no-op when the path isn't tracked", async () => {
+    await ensureWorkspaceRepo(dir);
+    const headBefore = await getHeadSha(dir);
+    const pruned = await untrackPath(dir, "infra", supervisorAuthor);
+    expect(pruned).toBe(false);
+    const headAfter = await getHeadSha(dir);
+    expect(headAfter).toBe(headBefore);
   });
 });
