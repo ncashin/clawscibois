@@ -66,9 +66,30 @@ const opencodeUsername =
 const opencodeCors =
   process.env.OPENCODE_CORS?.trim() ||
   `http://localhost:${cfg.websitePort}`;
+const opencodeApiKey = process.env.OPENCODE_API_KEY?.trim() ?? "";
+const opencodeModel = process.env.OPENCODE_MODEL?.trim() ?? "";
+const opencodeConfigPath = `${cfg.workspaceDir}/infra/opencode.json`;
 
 let opencode: ManagedProcess | null = null;
 if (opencodePassword) {
+  // OPENCODE_API_KEY is the documented-but-undocumented env var for
+  // non-interactive Zen/Go auth (github.com/anomalyco/opencode#21189).
+  // OPENCODE_CONFIG points at our root-owned config file which sets the
+  // default model via {env:OPENCODE_MODEL} substitution.
+  const opencodeEnv: Record<string, string> = {
+    OPENCODE_SERVER_PASSWORD: opencodePassword,
+    OPENCODE_SERVER_USERNAME: opencodeUsername,
+    OPENCODE_CONFIG: opencodeConfigPath,
+  };
+  if (opencodeApiKey) opencodeEnv.OPENCODE_API_KEY = opencodeApiKey;
+  if (opencodeModel) opencodeEnv.OPENCODE_MODEL = opencodeModel;
+
+  log("opencode", "launching", {
+    hasApiKey: Boolean(opencodeApiKey),
+    model: opencodeModel || "(default)",
+    configPath: opencodeConfigPath,
+  });
+
   opencode = new ManagedProcess({
     name: "opencode",
     cmd: [
@@ -83,10 +104,7 @@ if (opencodePassword) {
       cfg.workspaceDir,
     ],
     cwd: cfg.workspaceDir,
-    env: {
-      OPENCODE_SERVER_PASSWORD: opencodePassword,
-      OPENCODE_SERVER_USERNAME: opencodeUsername,
-    },
+    env: opencodeEnv,
     crashWindowMs: cfg.crashWindowMs,
     crashThreshold: cfg.crashThreshold,
   });
