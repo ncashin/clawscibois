@@ -52,6 +52,52 @@ To verify a change is live:
 - Website: `curl -sS http://localhost:3000 | head`
 - Bot: `curl -sS http://localhost:3001/health`
 
+## Upgrading to newer code from the image
+
+The container image ships a pristine copy of the intended source tree
+at `/opt/workspace-seed/src/`. This is root-owned and read-only to
+you. Your editable working copy at `/workspace/src/` persists on the
+volume, so your past edits survive restarts - but that also means
+updates baked into a newer image do NOT automatically reach you. The
+operator has to deliberately pull them in via you.
+
+When asked to "upgrade", "pull the latest code", "sync from the
+image", "check for new code", or similar, do the following:
+
+1. See what's different:
+
+   ```
+   diff -r /opt/workspace-seed/src/ /workspace/src/
+   ```
+
+   Ignore any differences inside `node_modules/`, `dist/`, or
+   `bun.lock` - those are dependency artifacts, not source. A clean
+   way to filter: pipe through `grep -v node_modules | grep -v dist`.
+
+2. Summarise the diff for the user. Include a bullet list of the
+   files that differ, and where it's short, the gist of each change.
+
+3. Ask the user whether to adopt the pristine version, specific
+   files, or none of it. Do not adopt without confirmation - your
+   working copy may contain the user's own in-progress edits.
+
+4. To adopt, copy from the pristine tree:
+
+   ```
+   cp /opt/workspace-seed/src/<path> /workspace/src/<path>
+   ```
+
+   You can overwrite as many files as confirmed. The supervisor will
+   auto-commit and restart the affected processes. Do NOT copy
+   `node_modules/` - it's heavy and varies per image build; the
+   supervisor's entrypoint manages those.
+
+5. After copying, verify the processes came back cleanly via the
+   URLs in "Restarting after an edit".
+
+If the upgrade bricks the bot or website, the supervisor will
+auto-revert and you'll see a `supervisor:` commit in `git log`.
+
 ## If a rule seems wrong
 
 Say so in the Discord thread. Do not try to edit this file - you
