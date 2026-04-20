@@ -6,6 +6,18 @@ type Options = {
   crashWindowMs: number;
   crashThreshold: number;
   restartDelayMs?: number;
+  // If set (>0), any exit — even a clean exit code 0 — within this many
+  // milliseconds of the most recent start is counted as a crash. This
+  // catches pathological states that look like "a long-running service
+  // that has decided to exit promptly": for example, if the agent
+  // replaces the bot's entry point with `console.log("hi")`, the process
+  // exits 0 after ~200ms forever. Without an uptime guard the supervisor
+  // never counts these as crashes and never triggers auto-revert.
+  //
+  // Pick a value longer than the service's normal startup time but short
+  // enough that a healthy service clearly crosses it. ~5s is a good
+  // default for Bun-based services.
+  minUptimeMs?: number;
   runAsUid?: number;
   runAsGid?: number;
 };
@@ -123,9 +135,16 @@ export class ManagedProcess {
   }
 
   private handleExit(code: number): void {
+    // Capture uptime before nulling startedAt so the min-uptime guard
+    // below can tell whether the process crossed its uptime threshold.
+    const exitedAt = Date.now();
+    const startedAt = this.startedAt;
+    const uptimeMs =
+      startedAt !== null ? exitedAt - startedAt : null;
+
     this.proc = null;
     this.lastExitCode = code;
-    this.lastExitAt = Date.now();
+    this.lastExitAt = exitedAt;
     this.startedAt = null;
 
     if (this.stopped) return;
@@ -136,8 +155,15 @@ export class ManagedProcess {
       return;
     }
 
-    if (code !== 0) {
-      this.crashTimestamps.push(Date.now());
+    // Count as a crash if either (a) the process exited non-zero, or
+    // (b) a minUptimeMs is configured and the process didn't stay up
+    // long enough. The second branch catches "clean exit in a loop"
+    // cases the simple non-zero check would miss.
+    const minUptime = this.options.minUptimeMs ?? 0;
+    const tooShort =
+      minUptime > 0 && uptimeMs !== null && uptimeMs < minUptime;
+    if (code !== 0 || tooShort) {
+      this.crashTimestamps.push(exitedAt);
       if (this.pruneAndCount() >= this.options.crashThreshold) {
         this.bricked = true;
         return;

@@ -17,6 +17,7 @@ describe("loadConfig", () => {
     expect(cfg.crashWindowMs).toBe(60_000);
     expect(cfg.crashThreshold).toBe(5);
     expect(cfg.goodRefWindowMs).toBe(60_000);
+    expect(cfg.minUptimeMs).toBe(5_000);
   });
 
   test("env overrides apply", () => {

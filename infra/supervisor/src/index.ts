@@ -127,6 +127,10 @@ const website = new ManagedProcess({
   },
   crashWindowMs: cfg.crashWindowMs,
   crashThreshold: cfg.crashThreshold,
+  // Revertables use the uptime guard so pathological clean-exit loops
+  // (e.g., agent replaces index with `console.log('...')`) still count
+  // as crashes and trigger auto-revert.
+  minUptimeMs: cfg.minUptimeMs,
 });
 
 const discordbot = new ManagedProcess({
@@ -139,6 +143,7 @@ const discordbot = new ManagedProcess({
   },
   crashWindowMs: cfg.crashWindowMs,
   crashThreshold: cfg.crashThreshold,
+  minUptimeMs: cfg.minUptimeMs,
 });
 
 const revertable = [website, discordbot]; // opencode crashes don't trigger revert
