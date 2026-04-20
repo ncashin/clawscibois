@@ -135,4 +135,73 @@ describe("ManagedProcess", () => {
     expect(afterRestart).toBeGreaterThan(0);
     await mp.stop();
   });
+
+  // Regression: an agent-authored `console.log("hehehe")` entry point
+  // exits 0 after a few hundred ms. Without minUptimeMs, those clean
+  // exits aren't counted as crashes, so the supervisor never auto-reverts
+  // and the process spins forever in a print-exit-restart loop. With
+  // minUptimeMs configured, the short-lived exits count and eventually
+  // trip crashThreshold, marking the process bricked.
+  test("minUptimeMs: short-lived clean exits count as crashes", async () => {
+    const mp = new ManagedProcess({
+      name: "quick-clean",
+      // exit 0 after ~50ms of work
+      cmd: ["sh", "-c", "sleep 0.05; exit 0"],
+      cwd: "/tmp",
+      env: {},
+      crashWindowMs: 60_000,
+      crashThreshold: 3,
+      restartDelayMs: 10,
+      minUptimeMs: 500,
+    });
+    mp.start();
+    await sleep(600);
+    const s = mp.state();
+    expect(s.crashesInWindow).toBeGreaterThanOrEqual(3);
+    expect(s.bricked).toBe(true);
+    expect(s.lastExitCode).toBe(0); // The exits really were clean
+    await mp.stop();
+  });
+
+  test("minUptimeMs: long-uptime clean exits do NOT count as crashes", async () => {
+    // This guards against the minUptime guard being too aggressive: if a
+    // process legitimately runs for long enough before exiting cleanly,
+    // it shouldn't poison the crash budget.
+    const mp = new ManagedProcess({
+      name: "long-clean",
+      // sleep 0.3, exit 0 cleanly
+      cmd: ["sh", "-c", "sleep 0.3; exit 0"],
+      cwd: "/tmp",
+      env: {},
+      crashWindowMs: 60_000,
+      crashThreshold: 2,
+      restartDelayMs: 10,
+      minUptimeMs: 100, // ~3x less than the process uptime
+    });
+    mp.start();
+    await sleep(500);
+    const s = mp.state();
+    expect(s.crashesInWindow).toBe(0);
+    expect(s.bricked).toBe(false);
+    await mp.stop();
+  });
+
+  test("minUptimeMs = 0 disables the guard (default)", async () => {
+    const mp = new ManagedProcess({
+      name: "no-guard",
+      cmd: ["sh", "-c", "exit 0"],
+      cwd: "/tmp",
+      env: {},
+      crashWindowMs: 60_000,
+      crashThreshold: 2,
+      restartDelayMs: 10,
+      // minUptimeMs omitted -> defaults to 0 -> disabled
+    });
+    mp.start();
+    await sleep(200);
+    const s = mp.state();
+    expect(s.crashesInWindow).toBe(0);
+    expect(s.bricked).toBe(false);
+    await mp.stop();
+  });
 });

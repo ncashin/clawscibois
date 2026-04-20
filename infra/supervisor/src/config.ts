@@ -12,6 +12,7 @@ export type SupervisorConfig = {
   crashWindowMs: number;
   crashThreshold: number;
   goodRefWindowMs: number;
+  minUptimeMs: number;
 };
 
 function parseIntEnv(
@@ -58,5 +59,6 @@ export function loadConfig(
     crashWindowMs: parseIntEnv(env, "CRASH_WINDOW_MS", 60_000),
     crashThreshold: parseIntEnv(env, "CRASH_THRESHOLD", 5),
     goodRefWindowMs: parseIntEnv(env, "GOOD_REF_WINDOW_MS", 60_000),
+    minUptimeMs: parseIntEnv(env, "MIN_UPTIME_MS", 5_000),
   };
 }
