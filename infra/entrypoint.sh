@@ -8,21 +8,27 @@ log() { printf '%s [entrypoint] %s\n' "$(date -Iseconds)" "$*"; }
 
 # 1. Seed workspace on first boot.
 # Infra (entrypoint, supervisor) runs from /opt/workspace-seed and is NOT
-# copied here; only AGENTS.md goes in so OpenCode sessions can read it.
-# node_modules and dist are excluded - they're heavy and don't belong in
-# the workspace git repo.
+# copied here. node_modules and dist are excluded - they're heavy and
+# don't belong in the workspace git repo.
 if [ ! -f "$ROOT/.workspace-seed" ]; then
   log "seeding $ROOT from $SEED"
   mkdir -p "$ROOT"
   rsync -a --exclude='node_modules' --exclude='dist' "$SEED/src/" "$ROOT/src/"
   mkdir -p "$ROOT/infra"
-  cp -a "$SEED/infra/AGENTS.md" "$ROOT/infra/AGENTS.md"
   cp -a "$SEED/infra/workspace.gitignore" "$ROOT/.gitignore"
   touch "$ROOT/.workspace-seed"
 fi
 
+# Refresh /workspace/infra/AGENTS.md on every boot from the image. The rules
+# doc is the source of truth; the agent needs it to track image updates, not
+# be pinned to whatever was in the volume when it was first seeded.
+mkdir -p "$ROOT/infra"
+cp -f "$SEED/infra/AGENTS.md" "$ROOT/infra/AGENTS.md"
+
 # 2. Regenerate /workspace/AGENTS.md (immutable rules + editable tail).
-RULES="$ROOT/infra/AGENTS.md"
+# Read rules from the image, not the workspace copy, so image updates
+# reach the agent without requiring a re-seed.
+RULES="$SEED/infra/AGENTS.md"
 AGENTS="$ROOT/AGENTS.md"
 TMPL="$SEED/AGENTS.md.tmpl"
 SENTINEL='<!-- @@agent-editable-below -->'
