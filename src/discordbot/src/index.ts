@@ -240,6 +240,37 @@ chat.onSubscribedMessage(async (thread, message) => {
   await handlePrompt(thread, message.text);
 });
 
+// Auto-subscribe to Discord-native threads under the allowed parent
+// channel even without an initial @-mention, so conversations feel
+// natural: users spawn a thread, start typing, the bot engages.
+//
+// The chat-sdk's only hook that fires on unsubscribed-thread messages
+// without requiring a mention is onNewMessage(regex). We use /.*/ to
+// match every message, then filter in userspace:
+//
+//   1. Must be in a Discord-native sub-thread (thread.id differs from
+//      thread.channelId). Top-level channel messages still require an
+//      explicit @-mention via onNewMention — otherwise we'd reply to
+//      every message in the allowed channel, which is loud and wrong.
+//   2. The containing (parent) channel must match DISCORD_ALLOWED_CHANNEL_ID.
+//   3. Skip mentions: onNewMention already handles those, and the SDK
+//      may invoke both handlers for a single mention.
+//   4. Skip self/bot messages.
+chat.onNewMessage(/.*/, async (thread, message) => {
+  if (message.author.isMe || message.author.isBot) return;
+  if (message.isMention) return; // onNewMention owns these
+  if (thread.id === thread.channelId) return; // top-level channel msg, not a thread
+  if (!threadIsInAllowedChannel(thread)) return;
+
+  log("event", "onNewMessage: auto-subscribing thread + handling", {
+    threadId: thread.id,
+    channelId: thread.channelId,
+    authorId: message.author.id,
+  });
+  await thread.subscribe();
+  await handlePrompt(thread, message.text);
+});
+
 function runGatewayLoop(): void {
   void (async () => {
     const discord = chat.getAdapter("discord");
