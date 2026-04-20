@@ -86,6 +86,19 @@ if [ "$(id -u)" -eq 0 ]; then
   mkdir -p "$ROOT/.opencode"
   chown -R agent:agent "$ROOT/.opencode"
 
+  # .chat-state: app-owned, agent-unreadable. Holds the Discord bot's
+  # SQLite state (subscriptions, locks, cached keys, queues). Keeping
+  # this strictly out of reach of the agent ensures the bot cannot have
+  # its memory wiped, corrupted, or exfiltrated by agent activity.
+  mkdir -p "$ROOT/.chat-state"
+  chown -R app:app "$ROOT/.chat-state"
+  chmod 700 "$ROOT/.chat-state"
+  # Any files that already exist inside (from previous runs) should be
+  # owned app:app too.
+  find "$ROOT/.chat-state" -exec chown app:app {} +
+  find "$ROOT/.chat-state" -type d -exec chmod 700 {} +
+  find "$ROOT/.chat-state" -type f -exec chmod 600 {} +
+
   # .git will be created/used by the supervisor if missing; ensure the
   # workspace itself is traversable and give agent group write via .git
   # once it exists.

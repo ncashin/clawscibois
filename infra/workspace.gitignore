@@ -10,3 +10,8 @@ dist/
 # root, so recovery breaks. We exclude it entirely and let it live as
 # untracked, unmodifiable content.
 infra/
+
+# .chat-state/ holds the Discord bot's SQLite state (subscriptions,
+# locks, cached keys, queues). Owned app:app mode 700; the agent can't
+# read or write it. Not meaningful to track in git — it's live state.
+.chat-state/
