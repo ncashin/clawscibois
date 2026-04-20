@@ -12,8 +12,8 @@ describe("loadConfig", () => {
     expect(cfg.websitePort).toBe(3000);
     expect(cfg.discordbotPort).toBe(3001);
     expect(cfg.opencodePort).toBe(4096);
-    expect(cfg.commitDebounceMs).toBe(1000);
-    expect(cfg.restartDebounceMs).toBe(500);
+    expect(cfg.commitDebounceMs).toBe(3000);
+    expect(cfg.restartDebounceMs).toBe(2500);
     expect(cfg.crashWindowMs).toBe(60_000);
     expect(cfg.crashThreshold).toBe(5);
     expect(cfg.goodRefWindowMs).toBe(60_000);
