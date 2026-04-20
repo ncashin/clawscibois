@@ -19,11 +19,11 @@ if [ ! -f "$ROOT/.workspace-seed" ]; then
   touch "$ROOT/.workspace-seed"
 fi
 
-# Refresh /workspace/infra/AGENTS.md on every boot from the image. The rules
-# doc is the source of truth; the agent needs it to track image updates, not
-# be pinned to whatever was in the volume when it was first seeded.
+# Refresh root-owned workspace infra files from the image every boot so
+# image updates reach the agent without requiring a re-seed.
 mkdir -p "$ROOT/infra"
 cp -f "$SEED/infra/AGENTS.md" "$ROOT/infra/AGENTS.md"
+cp -f "$SEED/infra/opencode.json" "$ROOT/infra/opencode.json"
 
 # 2. Regenerate /workspace/AGENTS.md (immutable rules + editable tail).
 # Read rules from the image, not the workspace copy, so image updates
@@ -56,6 +56,7 @@ if [ "$(id -u)" -eq 0 ]; then
   chown -R root:root "$ROOT/infra"
   chmod 755 "$ROOT/infra"
   chmod 644 "$ROOT/infra/AGENTS.md"
+  chmod 644 "$ROOT/infra/opencode.json"
 
   chown app:app "$ROOT"
   chmod 755 "$ROOT"
