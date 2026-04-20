@@ -62,6 +62,58 @@ export async function health(
   throw new Error(String(lastError));
 }
 
+type SessionSummary = {
+  id: string;
+  title?: string;
+};
+
+// OpenCode's GET /session returns all sessions the server knows about.
+// We use this on bot startup to reconnect Discord threads to their
+// pre-existing OpenCode sessions (titled "discord:{threadId}") rather
+// than stranding long conversations when the bot restarts.
+export async function listSessions(
+  config: OpenCodeConfig,
+): Promise<SessionSummary[]> {
+  const startedAt = Date.now();
+  const response = await fetch(new URL("/session", config.baseUrl), {
+    method: "GET",
+    headers: { ...authHeader(config) },
+  });
+  const durationMs = Date.now() - startedAt;
+  if (!response.ok) {
+    const errorText = await readError(response);
+    log("opencode", "listSessions: non-2xx", {
+      durationMs,
+      status: response.status,
+      errorText,
+    });
+    throw new Error(errorText);
+  }
+  const data = (await response.json()) as unknown;
+  if (!Array.isArray(data)) {
+    log("opencode", "listSessions: unexpected payload", {
+      durationMs,
+      actualType: typeof data,
+    });
+    throw new Error("OpenCode: /session returned non-array");
+  }
+  const sessions: SessionSummary[] = data
+    .filter(
+      (s): s is Record<string, unknown> =>
+        s !== null && typeof s === "object",
+    )
+    .map((s) => ({
+      id: String(s.id ?? ""),
+      title: typeof s.title === "string" ? s.title : undefined,
+    }))
+    .filter((s) => s.id !== "");
+  log("opencode", "listSessions: response", {
+    durationMs,
+    count: sessions.length,
+  });
+  return sessions;
+}
+
 export async function createSession(
   config: OpenCodeConfig,
   title?: string,
