@@ -145,6 +145,39 @@ const chat = new Chat({
   state: chatState,
 });
 
+// Patch the Discord adapter to respect the allowed-channel gate at
+// thread-creation time, not just at reply time. The stock adapter
+// unconditionally creates a Discord thread whenever the bot is
+// @-mentioned in a channel (see @chat-adapter/discord's
+// handleGatewayMessage). Our own onNewMention gate only runs *after*
+// the thread is already created, so without this patch an @-mention
+// in a disallowed channel still spawns an orphan thread.
+//
+// Throwing is fine: the adapter's error handler (try/catch around
+// createDiscordThread) logs the failure and proceeds with
+// discordThreadId undefined, so the message still reaches our
+// handlers as a top-level channel message, which our gate then
+// filters. Net: no thread, no reply, nothing.
+if (allowedChannelId) {
+  const discord = chat.getAdapter("discord") as unknown as {
+    createDiscordThread(channelId: string, messageId: string): Promise<unknown>;
+  };
+  const original = discord.createDiscordThread.bind(discord);
+  discord.createDiscordThread = async (channelId, messageId) => {
+    if (channelId !== allowedChannelId) {
+      log("gate", "refusing auto-thread in disallowed channel", {
+        channelId,
+        messageId,
+        allowedChannelId,
+      });
+      throw new Error(
+        `DISCORD_ALLOWED_CHANNEL_ID gate: thread creation blocked in ${channelId}`,
+      );
+    }
+    return original(channelId, messageId);
+  };
+}
+
 async function handlePrompt(thread: Thread, text: string): Promise<void> {
   const trimmed = text.trim();
   if (!trimmed) return;
