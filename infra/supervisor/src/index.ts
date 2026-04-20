@@ -43,9 +43,10 @@ log("boot", "supervisor starting", { cfg });
 await ensureWorkspaceRepo(cfg.workspaceDir);
 log("boot", "workspace git repo ready");
 
-// Self-heal: if a prior image tracked `infra/` (which is root-owned),
-// stop tracking it now so future reverts don't fail on unlink permission
-// errors when HEAD crosses commits that changed those files.
+// Self-heal: older images tracked /workspace/infra, but that path is
+// root-owned. A later `git reset --hard` across such a commit would try
+// to unlink root-owned files as `app` and fail. Drop the tracking if
+// we inherit it from disk.
 const prunedInfra = await untrackPath(
   cfg.workspaceDir,
   "infra",
@@ -55,14 +56,10 @@ if (prunedInfra) {
   log("git", "stopped tracking infra/ (self-heal)");
 }
 
-// Processes ---------------------------------------------------------------
-
-// OpenCode is fail-closed: we refuse to start it without a password.
-// Rationale: the serve port is exposed beyond localhost (so Traefik can
-// route to it). An unauthenticated server on a public hostname would be
-// a backdoor into the agent sandbox. We'd rather degrade — bot + website
-// keep working, opencode-dependent paths error clearly — than silently
-// run an open door.
+// Fail-closed on OpenCode auth. The serve port is reachable beyond
+// localhost (Traefik routes to it), so an unsecured daemon would be a
+// backdoor into the sandbox. Better to degrade - bot and website keep
+// running, opencode calls error clearly - than silently open a door.
 const opencodePassword = process.env.OPENCODE_SERVER_PASSWORD?.trim() ?? "";
 const opencodeUsername =
   process.env.OPENCODE_SERVER_USERNAME?.trim() || "opencode";
@@ -99,10 +96,9 @@ if (opencodePassword) {
   });
 }
 
-// Synthetic state for snapshot() when opencode is intentionally absent.
-// Marked `bricked: true` so supervisor health reports ok:false — that
-// matters for the HEALTHCHECK and for surface visibility: a
-// misconfigured deploy should look unhealthy, not "working but lying".
+// Synthetic state when opencode is intentionally absent. bricked:true
+// so /supervisor/health reports ok:false and the container HEALTHCHECK
+// surfaces the misconfig, rather than reporting green while broken.
 function opencodeState(): ProcessState {
   if (opencode) return opencode.state();
   return {
@@ -118,8 +114,7 @@ function opencodeState(): ProcessState {
 
 const website = new ManagedProcess({
   name: "website",
-  // Build CSS, then exec the SSR server. `exec` replaces the shell so
-  // signals still reach the server directly.
+  // `exec` replaces the shell so signals reach the Bun server directly.
   cmd: ["bash", "-c", "bun run build:css && exec bun run src/server.tsx"],
   cwd: cfg.websiteDir,
   env: {
@@ -127,9 +122,8 @@ const website = new ManagedProcess({
   },
   crashWindowMs: cfg.crashWindowMs,
   crashThreshold: cfg.crashThreshold,
-  // Revertables use the uptime guard so pathological clean-exit loops
-  // (e.g., agent replaces index with `console.log('...')`) still count
-  // as crashes and trigger auto-revert.
+  // minUptimeMs catches pathological clean-exit loops (e.g. an agent-
+  // replaced `console.log(...)` index) that a non-zero-exit check misses.
   minUptimeMs: cfg.minUptimeMs,
 });
 
@@ -146,11 +140,10 @@ const discordbot = new ManagedProcess({
   minUptimeMs: cfg.minUptimeMs,
 });
 
-const revertable = [website, discordbot]; // opencode crashes don't trigger revert
+// opencode crashes don't trigger a code revert - no associated source change.
+const revertable = [website, discordbot];
 
-// State -------------------------------------------------------------------
-
-// These are cached so snapshot() can return them synchronously.
+// Cached for synchronous reads by snapshot().
 let lastGoodSha: string | null = null;
 let lastRevertAt: number | null = null;
 let recoveryHalted = false;
@@ -176,8 +169,6 @@ const healthSrv = startHealthServer({
 });
 log("boot", `health server listening on :${cfg.healthPort}`);
 
-// Auto-commit on file changes --------------------------------------------
-
 const commitBatcher = createDebouncedBatcher<string>(async (paths) => {
   const sha = await commitAll(cfg.workspaceDir, {
     author: AGENT_AUTHOR,
@@ -185,8 +176,6 @@ const commitBatcher = createDebouncedBatcher<string>(async (paths) => {
   });
   if (sha) log("git", "committed", { sha, pathCount: paths.length });
 }, cfg.commitDebounceMs, (err) => log("git", "commit failed", { error: String(err) }));
-
-// Restart on source change -----------------------------------------------
 
 type RestartTarget = "website" | "discordbot";
 const restartBatcher = createDebouncedBatcher<RestartTarget>(
@@ -222,16 +211,12 @@ watchers.push(
 
 log("boot", "file watchers armed");
 
-// Start children ----------------------------------------------------------
-
 opencode?.start();
 website.start();
 discordbot.start();
 
-// Health gating + last-good ref + auto-revert loop -----------------------
-
 async function tick(): Promise<void> {
-  // Advance the good ref if revertable processes have been healthy for the window.
+  // Advance the good ref when revertables have been healthy for the window.
   const now = Date.now();
   const allHealthy = revertable.every((p) => {
     const s = p.state();
@@ -256,9 +241,8 @@ async function tick(): Promise<void> {
     }
   }
 
-  // Handle a bricked revertable process. We only revert once per tick even if
-  // both are bricked — after the first revert+restart, both become unbricked
-  // together, so looping would just thrash.
+  // Revert at most once per tick even if both revertables are bricked;
+  // the single revert+restart unbricks both.
   if (recoveryHalted) return;
   const bricked = revertable.find((p) => p.state().bricked);
   if (!bricked) return;
@@ -276,9 +260,8 @@ async function tick(): Promise<void> {
   });
   try {
     await hardResetTo(cfg.workspaceDir, good);
-    // Record the revert event as an explicit supervisor commit so `git log`
-    // clearly shows both the agent's bad change and the supervisor's response.
-    // --allow-empty because the working tree now matches `good`.
+    // Empty commit records the revert in `git log` so both the agent's
+    // bad change and the supervisor's response are visible in history.
     await commitAll(cfg.workspaceDir, {
       author: SUPERVISOR_AUTHOR,
       message: `supervisor: auto-revert to ${good.slice(0, 7)}`,
@@ -307,8 +290,6 @@ async function tick(): Promise<void> {
 const tickHandle = setInterval(() => {
   void tick().catch((err) => log("tick", "unhandled error", { error: String(err) }));
 }, 2000);
-
-// Graceful shutdown -------------------------------------------------------
 
 let shuttingDown = false;
 async function shutdown(sig: string): Promise<void> {

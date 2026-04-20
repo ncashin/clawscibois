@@ -6,17 +6,10 @@ type Options = {
   crashWindowMs: number;
   crashThreshold: number;
   restartDelayMs?: number;
-  // If set (>0), any exit — even a clean exit code 0 — within this many
-  // milliseconds of the most recent start is counted as a crash. This
-  // catches pathological states that look like "a long-running service
-  // that has decided to exit promptly": for example, if the agent
-  // replaces the bot's entry point with `console.log("hi")`, the process
-  // exits 0 after ~200ms forever. Without an uptime guard the supervisor
-  // never counts these as crashes and never triggers auto-revert.
-  //
-  // Pick a value longer than the service's normal startup time but short
-  // enough that a healthy service clearly crosses it. ~5s is a good
-  // default for Bun-based services.
+  // Any exit within this many ms of the last start counts as a crash,
+  // even exit code 0. Catches clean-exit loops (e.g. the agent rewrites
+  // index.ts to just `console.log(...)`) that a non-zero check misses.
+  // ~5s is a reasonable default for Bun services.
   minUptimeMs?: number;
   runAsUid?: number;
   runAsGid?: number;
@@ -58,7 +51,7 @@ export class ManagedProcess {
         stdout: "inherit",
         stderr: "inherit",
         stdin: "ignore",
-        // uid/gid require root to set; harmless when unset.
+        // uid/gid require root to set; harmless when undefined.
         ...(this.options.runAsUid !== undefined ? { uid: this.options.runAsUid } : {}),
         ...(this.options.runAsGid !== undefined ? { gid: this.options.runAsGid } : {}),
       });
@@ -79,18 +72,17 @@ export class ManagedProcess {
       clearTimeout(this.restartHandle);
       this.restartHandle = null;
     }
-    // Only flag the exit as expected if there's actually a process to kill.
-    // Otherwise the flag would leak into a future spawn's handleExit and
-    // suppress its crash count (causing the supervisor to zombie the
-    // process: running: false, bricked: false, crashesInWindow: 0, forever).
+    // Only flag expectedExit when there's actually a process to kill,
+    // otherwise the flag leaks into a future spawn's handleExit and
+    // silently suppresses its crash. Caused a zombie state in prod:
+    // running:false, bricked:false, crashesInWindow:0, forever.
     if (this.proc) this.expectedExit = true;
     await this.killRunningProc();
   }
 
   async restart(): Promise<void> {
     if (this.stopped) return;
-    // See the note in stop(): never set expectedExit unless a kill is
-    // actually going to happen.
+    // Same rule as stop(): don't set the flag unless a kill will happen.
     if (this.proc) this.expectedExit = true;
     await this.killRunningProc();
     this.start();
@@ -135,8 +127,7 @@ export class ManagedProcess {
   }
 
   private handleExit(code: number): void {
-    // Capture uptime before nulling startedAt so the min-uptime guard
-    // below can tell whether the process crossed its uptime threshold.
+    // Capture uptime before clearing startedAt so the guard below can use it.
     const exitedAt = Date.now();
     const startedAt = this.startedAt;
     const uptimeMs =
@@ -150,15 +141,13 @@ export class ManagedProcess {
     if (this.stopped) return;
 
     if (this.expectedExit) {
-      // Deliberate kill from stop() or restart(); don't count as a crash.
+      // Kill from stop()/restart() - not a crash.
       this.expectedExit = false;
       return;
     }
 
-    // Count as a crash if either (a) the process exited non-zero, or
-    // (b) a minUptimeMs is configured and the process didn't stay up
-    // long enough. The second branch catches "clean exit in a loop"
-    // cases the simple non-zero check would miss.
+    // Crash if non-zero, or (when configured) if the process failed to
+    // stay up past minUptimeMs. The latter catches clean-exit loops.
     const minUptime = this.options.minUptimeMs ?? 0;
     const tooShort =
       minUptime > 0 && uptimeMs !== null && uptimeMs < minUptime;

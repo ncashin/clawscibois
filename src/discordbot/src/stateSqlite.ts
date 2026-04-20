@@ -1,29 +1,20 @@
-// SQLite-backed StateAdapter for chat-sdk, built on Bun's native bun:sqlite.
+// SQLite-backed StateAdapter for chat-sdk on Bun's bun:sqlite.
 //
-// Why we wrote our own:
-// - chat-adapter-sqlite uses better-sqlite3, which needs python/make/g++ at
-//   install time. Adding those to our image is ~200MB of bloat for a
-//   single dependency.
-// - Redis works but adds an extra container + volume to the deploy.
-// - bun:sqlite is synchronous, built in, and has no native-compile step.
+// We ship our own rather than using chat-adapter-sqlite (which needs
+// python/make/g++ at install time for better-sqlite3) or Redis (which
+// needs an extra container + volume). bun:sqlite is built in and
+// synchronous, so no native-compile step and no thread juggling.
 //
-// This implements the full 19-method StateAdapter contract. It is single-
-// host only (no distributed locks). Persistence is the whole point: the
-// DB file survives container restarts so the bot doesn't forget which
-// threads it was subscribed to, which keys it had cached, which messages
-// were queued, etc.
+// Single-host only: locks rely on SQLite's own file locking, not
+// distributed coordination. Persistence is the point - the DB file
+// survives container restarts so the bot doesn't forget its
+// subscriptions, cached keys, and queued messages.
 //
-// The adapter performs lazy TTL cleanup on reads plus a periodic sweep
-// (every 60s) for expired locks so stale entries don't accumulate. Reads
-// always respect expiry — you won't see a value the caller set with a TTL
-// that has since elapsed, even if the row is still on disk.
+// TTL cleanup is lazy on reads plus a periodic sweep (default every 60s).
+// Reads always respect expiry regardless of whether the sweep has run.
 
 import { Database } from "bun:sqlite";
 import type { Lock, QueueEntry, StateAdapter } from "chat";
-
-// ---------------------------------------------------------------------------
-// Schema
-// ---------------------------------------------------------------------------
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -42,8 +33,8 @@ CREATE TABLE IF NOT EXISTS locks (
 
 CREATE TABLE IF NOT EXISTS kv (
   key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,        -- JSON
-  expires_at INTEGER                -- NULL = no expiry, unix ms otherwise
+  value      TEXT NOT NULL,
+  expires_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS kv_expires_idx ON kv(expires_at)
   WHERE expires_at IS NOT NULL;
@@ -51,8 +42,8 @@ CREATE INDEX IF NOT EXISTS kv_expires_idx ON kv(expires_at)
 CREATE TABLE IF NOT EXISTS lists (
   key        TEXT NOT NULL,
   position   INTEGER NOT NULL,
-  value      TEXT NOT NULL,        -- JSON
-  expires_at INTEGER,               -- copied onto every row so whole-list expiry is a simple delete
+  value      TEXT NOT NULL,
+  expires_at INTEGER,
   PRIMARY KEY (key, position)
 );
 CREATE INDEX IF NOT EXISTS lists_key_idx ON lists(key);
@@ -60,31 +51,18 @@ CREATE INDEX IF NOT EXISTS lists_key_idx ON lists(key);
 CREATE TABLE IF NOT EXISTS queues (
   thread_id TEXT NOT NULL,
   position  INTEGER NOT NULL,
-  entry     TEXT NOT NULL,          -- JSON (QueueEntry)
+  entry     TEXT NOT NULL,
   PRIMARY KEY (thread_id, position)
 );
 CREATE INDEX IF NOT EXISTS queues_thread_idx ON queues(thread_id);
 `;
 
-// ---------------------------------------------------------------------------
-// Options
-// ---------------------------------------------------------------------------
-
 export type SqliteStateOptions = {
   /** Path to the SQLite file. ":memory:" works for tests. */
   path: string;
-  /**
-   * How often to sweep expired locks from disk (ms). Reads always respect
-   * expiry regardless; the sweep is just housekeeping so stale rows don't
-   * accumulate. 0 disables the sweep (useful for tests so timers don't
-   * keep the event loop alive).
-   */
+  /** Sweep interval (ms) for expired rows. 0 disables (use for tests). */
   cleanupIntervalMs?: number;
 };
-
-// ---------------------------------------------------------------------------
-// Adapter
-// ---------------------------------------------------------------------------
 
 export class BunSqliteStateAdapter implements StateAdapter {
   private readonly db: Database;
@@ -97,10 +75,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
     this.cleanupIntervalMs = options.cleanupIntervalMs ?? 60_000;
   }
 
-  // -------------------------------------------------------------------------
-  // Connection lifecycle
-  // -------------------------------------------------------------------------
-
   async connect(): Promise<void> {
     if (this.connected) return;
     this.db.exec(SCHEMA);
@@ -110,7 +84,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
         () => this.sweepExpired(),
         this.cleanupIntervalMs,
       );
-      // Don't keep the event loop alive just for the sweeper.
       this.sweepHandle.unref?.();
     }
   }
@@ -123,10 +96,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
     this.connected = false;
     this.db.close();
   }
-
-  // -------------------------------------------------------------------------
-  // Subscriptions
-  // -------------------------------------------------------------------------
 
   async subscribe(threadId: string): Promise<void> {
     this.ensureConnected();
@@ -152,18 +121,14 @@ export class BunSqliteStateAdapter implements StateAdapter {
     return row !== null;
   }
 
-  // -------------------------------------------------------------------------
-  // Locks
-  // -------------------------------------------------------------------------
-
   async acquireLock(threadId: string, ttlMs: number): Promise<Lock | null> {
     this.ensureConnected();
     const now = Date.now();
     const token = generateToken();
     const expiresAt = now + ttlMs;
 
-    // Atomic: insert new lock OR take over an expired one. The WHERE clause
-    // on ON CONFLICT ensures we only overwrite expired locks, not live ones.
+    // Atomic insert-or-take-over-expired. The WHERE clause on the
+    // ON CONFLICT branch ensures we never steal a live lock.
     const result = this.db
       .prepare(
         `INSERT INTO locks (thread_id, token, expires_at)
@@ -181,13 +146,10 @@ export class BunSqliteStateAdapter implements StateAdapter {
 
   async releaseLock(lock: Lock): Promise<void> {
     this.ensureConnected();
-    // Only delete if the token matches — otherwise another caller has
-    // acquired the lock since (per force-release semantics) and we must
-    // not steal theirs.
+    // Token check: if another caller force-released and re-acquired,
+    // we must not delete their lock.
     this.db
-      .prepare(
-        "DELETE FROM locks WHERE thread_id = $id AND token = $token",
-      )
+      .prepare("DELETE FROM locks WHERE thread_id = $id AND token = $token")
       .run({ $id: lock.threadId, $token: lock.token });
   }
 
@@ -201,7 +163,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
   async extendLock(lock: Lock, ttlMs: number): Promise<boolean> {
     this.ensureConnected();
     const now = Date.now();
-    const newExpiresAt = now + ttlMs;
     const result = this.db
       .prepare(
         `UPDATE locks
@@ -211,23 +172,17 @@ export class BunSqliteStateAdapter implements StateAdapter {
       .run({
         $id: lock.threadId,
         $token: lock.token,
-        $exp: newExpiresAt,
+        $exp: now + ttlMs,
         $now: now,
       });
     return result.changes > 0;
   }
 
-  // -------------------------------------------------------------------------
-  // Key-value cache
-  // -------------------------------------------------------------------------
-
   async get<T = unknown>(key: string): Promise<T | null> {
     this.ensureConnected();
     const now = Date.now();
     const row = this.db
-      .prepare(
-        "SELECT value, expires_at FROM kv WHERE key = $key",
-      )
+      .prepare("SELECT value, expires_at FROM kv WHERE key = $key")
       .get({ $key: key }) as
       | { value: string; expires_at: number | null }
       | null;
@@ -247,7 +202,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
     ttlMs?: number,
   ): Promise<void> {
     this.ensureConnected();
-    const expiresAt = ttlMs ? Date.now() + ttlMs : null;
     this.db
       .prepare(
         `INSERT INTO kv (key, value, expires_at) VALUES ($key, $value, $exp)
@@ -258,7 +212,7 @@ export class BunSqliteStateAdapter implements StateAdapter {
       .run({
         $key: key,
         $value: JSON.stringify(value),
-        $exp: expiresAt,
+        $exp: ttlMs ? Date.now() + ttlMs : null,
       });
   }
 
@@ -270,33 +224,31 @@ export class BunSqliteStateAdapter implements StateAdapter {
     this.ensureConnected();
     const now = Date.now();
     const expiresAt = ttlMs ? now + ttlMs : null;
-    // Wrap in a transaction to atomically evict-if-expired + insert.
-    const txn = this.db.transaction((args: {
-      key: string;
-      value: string;
-      exp: number | null;
-      now: number;
-    }): number => {
-      this.db
-        .prepare(
-          "DELETE FROM kv WHERE key = $key AND expires_at IS NOT NULL AND expires_at <= $now",
-        )
-        .run({ $key: args.key, $now: args.now });
-      const res = this.db
-        .prepare(
-          `INSERT INTO kv (key, value, expires_at) VALUES ($key, $value, $exp)
-           ON CONFLICT (key) DO NOTHING`,
-        )
-        .run({ $key: args.key, $value: args.value, $exp: args.exp });
-      return res.changes;
-    });
-    const changes = txn({
-      key,
-      value: JSON.stringify(value),
-      exp: expiresAt,
-      now,
-    });
-    return changes > 0;
+    // Transaction so "evict-if-expired then insert" is atomic.
+    const txn = this.db.transaction(
+      (args: {
+        key: string;
+        value: string;
+        exp: number | null;
+        now: number;
+      }): number => {
+        this.db
+          .prepare(
+            "DELETE FROM kv WHERE key = $key AND expires_at IS NOT NULL AND expires_at <= $now",
+          )
+          .run({ $key: args.key, $now: args.now });
+        const res = this.db
+          .prepare(
+            `INSERT INTO kv (key, value, expires_at) VALUES ($key, $value, $exp)
+             ON CONFLICT (key) DO NOTHING`,
+          )
+          .run({ $key: args.key, $value: args.value, $exp: args.exp });
+        return res.changes;
+      },
+    );
+    return (
+      txn({ key, value: JSON.stringify(value), exp: expiresAt, now }) > 0
+    );
   }
 
   async delete(key: string): Promise<void> {
@@ -304,10 +256,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
     this.db.prepare("DELETE FROM kv WHERE key = $key").run({ $key: key });
     this.db.prepare("DELETE FROM lists WHERE key = $key").run({ $key: key });
   }
-
-  // -------------------------------------------------------------------------
-  // Lists
-  // -------------------------------------------------------------------------
 
   async appendToList(
     key: string,
@@ -326,8 +274,7 @@ export class BunSqliteStateAdapter implements StateAdapter {
         maxLength: number | null;
         now: number;
       }): void => {
-        // If the list has expired, clear it before we append. That way the
-        // caller sees a fresh list, not stale entries + the new one.
+        // If expired, purge before appending; caller should see a fresh list.
         this.db
           .prepare(
             `DELETE FROM lists
@@ -335,14 +282,12 @@ export class BunSqliteStateAdapter implements StateAdapter {
           )
           .run({ $key: args.key, $now: args.now });
 
-        // Compute next position. MAX(position) returns null when the list
-        // is empty, which (null) + 1 = null in SQLite, so coalesce.
+        // COALESCE because MAX() on an empty set returns NULL, and NULL+1=NULL in SQLite.
         const maxRow = this.db
           .prepare(
             "SELECT COALESCE(MAX(position), -1) AS max_pos FROM lists WHERE key = $key",
           )
           .get({ $key: args.key }) as { max_pos: number };
-        const nextPos = maxRow.max_pos + 1;
 
         this.db
           .prepare(
@@ -351,23 +296,18 @@ export class BunSqliteStateAdapter implements StateAdapter {
           )
           .run({
             $key: args.key,
-            $pos: nextPos,
+            $pos: maxRow.max_pos + 1,
             $value: args.value,
             $exp: args.exp,
           });
 
-        // Refresh the expires_at on every row in the list so the list's
-        // TTL is a single logical value. Skip if no TTL was given.
+        // Sync the expiry onto every row so the list has one logical TTL.
         if (args.exp !== null) {
           this.db
-            .prepare(
-              "UPDATE lists SET expires_at = $exp WHERE key = $key",
-            )
+            .prepare("UPDATE lists SET expires_at = $exp WHERE key = $key")
             .run({ $key: args.key, $exp: args.exp });
         }
 
-        // Trim to maxLength from the left (oldest). A SQL DELETE by
-        // position threshold is clean and atomic.
         if (args.maxLength !== null && args.maxLength > 0) {
           this.db
             .prepare(
@@ -393,7 +333,6 @@ export class BunSqliteStateAdapter implements StateAdapter {
 
   async getList<T = unknown>(key: string): Promise<T[]> {
     this.ensureConnected();
-    const now = Date.now();
     const rows = this.db
       .prepare(
         `SELECT value, expires_at FROM lists
@@ -407,20 +346,14 @@ export class BunSqliteStateAdapter implements StateAdapter {
 
     if (rows.length === 0) return [];
 
-    // All rows share the same expires_at (we keep it in sync in
-    // appendToList). If expired, clear and return empty.
+    // All rows share the same expires_at (kept in sync by appendToList).
     const expiresAt = rows[0]!.expires_at;
-    if (expiresAt !== null && expiresAt <= now) {
+    if (expiresAt !== null && expiresAt <= Date.now()) {
       this.db.prepare("DELETE FROM lists WHERE key = $key").run({ $key: key });
       return [];
     }
-
     return rows.map((r) => JSON.parse(r.value) as T);
   }
-
-  // -------------------------------------------------------------------------
-  // Queues
-  // -------------------------------------------------------------------------
 
   async enqueue(
     threadId: string,
@@ -435,16 +368,18 @@ export class BunSqliteStateAdapter implements StateAdapter {
             "SELECT COALESCE(MAX(position), -1) AS max_pos FROM queues WHERE thread_id = $id",
           )
           .get({ $id: args.id }) as { max_pos: number };
-        const nextPos = maxRow.max_pos + 1;
 
         this.db
           .prepare(
             `INSERT INTO queues (thread_id, position, entry)
              VALUES ($id, $pos, $entry)`,
           )
-          .run({ $id: args.id, $pos: nextPos, $entry: args.entry });
+          .run({
+            $id: args.id,
+            $pos: maxRow.max_pos + 1,
+            $entry: args.entry,
+          });
 
-        // Trim oldest to maxSize. Same trick as lists.
         if (args.max > 0) {
           this.db
             .prepare(
@@ -458,9 +393,7 @@ export class BunSqliteStateAdapter implements StateAdapter {
         }
 
         const countRow = this.db
-          .prepare(
-            "SELECT COUNT(*) AS n FROM queues WHERE thread_id = $id",
-          )
+          .prepare("SELECT COUNT(*) AS n FROM queues WHERE thread_id = $id")
           .get({ $id: args.id }) as { n: number };
         return countRow.n;
       },
@@ -475,11 +408,10 @@ export class BunSqliteStateAdapter implements StateAdapter {
   async dequeue(threadId: string): Promise<QueueEntry | null> {
     this.ensureConnected();
     const now = Date.now();
-    // Pop in a transaction: read oldest live entry + delete it atomically.
-    // Also drop expired entries in the same pass so callers don't have to.
     const txn = this.db.transaction(
       (args: { id: string; now: number }): QueueEntry | null => {
-        // Discard stale entries.
+        // Drop expired entries first. json_extract reads the expiresAt
+        // field out of each row's serialized QueueEntry.
         this.db
           .prepare(
             `DELETE FROM queues
@@ -518,16 +450,10 @@ export class BunSqliteStateAdapter implements StateAdapter {
   async queueDepth(threadId: string): Promise<number> {
     this.ensureConnected();
     const row = this.db
-      .prepare(
-        "SELECT COUNT(*) AS n FROM queues WHERE thread_id = $id",
-      )
+      .prepare("SELECT COUNT(*) AS n FROM queues WHERE thread_id = $id")
       .get({ $id: threadId }) as { n: number };
     return row.n;
   }
-
-  // -------------------------------------------------------------------------
-  // Internal
-  // -------------------------------------------------------------------------
 
   private ensureConnected(): void {
     if (!this.connected) {

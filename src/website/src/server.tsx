@@ -26,7 +26,7 @@ const server = Bun.serve({
     const cssFile = Bun.file(cssPath);
     if (!(await cssFile.exists())) {
       return new Response(
-        "Missing dist/tailwind.css — run `bun run build:css` first.",
+        "Missing dist/tailwind.css - run `bun run build:css` first.",
         { status: 500, headers: { "Content-Type": "text/plain" } },
       );
     }

@@ -1,17 +1,10 @@
 #!/usr/bin/env bun
-// One-off script to wipe all global + guild-scoped application commands
-// for the Discord bot. Useful when commands are stuck in a confused
-// state from previous code paths or repeated re-registrations.
+// Wipe all global + guild-scoped slash commands for the Discord bot.
+// Useful when commands are stuck from previous registrations.
 //
-// Usage:
-//   DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... DISCORD_GUILD_ID=... \
-//     bun scripts/clear-discord-commands.ts
-//
-// With an .env at the repo root:
-//   set -a; source .env; set +a; bun scripts/clear-discord-commands.ts
-//
-// DISCORD_GUILD_ID is optional — if unset, only global commands are cleared.
-// Pass --dry-run to list what would be deleted without deleting.
+// Env: DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID (required),
+//      DISCORD_GUILD_ID (optional; clears only global if unset).
+// Flag: --dry-run lists without deleting.
 
 const API = "https://discord.com/api/v10";
 
@@ -68,8 +61,7 @@ async function clear(scope: string, url: string): Promise<void> {
     return;
   }
 
-  // Bulk-overwrite with an empty array is the documented atomic
-  // "delete all" operation. One request wipes the scope.
+  // PUT [] is Discord's documented atomic "delete all" for the scope.
   // https://discord.com/developers/docs/interactions/application-commands#bulk-overwrite-global-application-commands
   const res = await fetch(url, {
     method: "PUT",
@@ -83,10 +75,9 @@ async function clear(scope: string, url: string): Promise<void> {
     );
   }
 
-  // Confirm by re-listing.
   const after = await listCommands(scope, url);
   if (after.length === 0) {
-    console.log(`[${scope}] cleared — 0 commands remain`);
+    console.log(`[${scope}] cleared - 0 commands remain`);
   } else {
     console.warn(
       `[${scope}] WARN: bulk-overwrite returned 2xx but ${after.length} command(s) remain`,
