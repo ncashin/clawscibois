@@ -10,10 +10,6 @@ services:
       - "${DISCORD_BOT_PORT:-3001}:${DISCORD_BOT_PORT:-3001}"
     restart: unless-stopped
     volumes:
-      # Use a Docker-managed named volume (ext4 inside the VM) rather than a
-      # host bind mount. Bind mounts on macOS go through grpcfuse which does
-      # not enforce Linux uid/perm semantics the way we need for the agent
-      # sandbox (root-owned 755 dirs become writable by non-root users).
       - clawscibois_workspace:/workspace
     env_file:
       - path: ../.env
