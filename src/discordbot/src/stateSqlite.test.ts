@@ -243,7 +243,7 @@ describe("queues", () => {
     }
     expect(await state.queueDepth("t1")).toBe(3);
 
-    // Dequeue all — should be the three most recent, in order.
+    // Dequeue all; should be the three most recent, in order.
     const out: number[] = [];
     while (true) {
       const e = await state.dequeue("t1");

@@ -106,7 +106,7 @@ describe("ManagedProcess", () => {
   // bricked the process), the stale `expectedExit = true` flag leaked
   // into the next spawn's handleExit and suppressed its crash count.
   // Symptom in production: website shows { running: false, bricked: false,
-  // crashesInWindow: 0 } forever — the supervisor is blind to the ongoing
+  // crashesInWindow: 0 } forever; the supervisor is blind to the ongoing
   // failures and never reschedules.
   test("restart() on a dead process still counts subsequent crashes", async () => {
     const mp = new ManagedProcess({

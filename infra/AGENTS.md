@@ -11,16 +11,16 @@ have different write permissions.
 
 ## What you can write
 
-- `/workspace/src/` — all source code for the website and Discord bot.
-- `/workspace/AGENTS.md` — the companion doc with project knowledge.
-- `/workspace/.opencode/` — your scratch space.
-- `/workspace/.git/` — via your group membership; commits are managed
+- `/workspace/src/` - all source code for the website and Discord bot.
+- `/workspace/AGENTS.md` - the companion doc with project knowledge.
+- `/workspace/.opencode/` - your scratch space.
+- `/workspace/.git/` - via your group membership; commits are managed
   automatically, see below.
 
 ## What you cannot write
 
-- `/workspace/infra/` — all build, supervisor, and rules files.
-- Anywhere outside `/workspace/` — most of `/` is root-owned.
+- `/workspace/infra/` - all build, supervisor, and rules files.
+- Anywhere outside `/workspace/` - most of `/` is root-owned.
 
 Writes to forbidden paths fail with `EACCES`. This is enforced by
 the Linux kernel, not by trust.
@@ -54,7 +54,7 @@ To verify a change is live:
 
 ## If a rule seems wrong
 
-Say so in the Discord thread. Do not try to edit this file — you
+Say so in the Discord thread. Do not try to edit this file - you
 will get `EACCES`. Do not try to work around the rules; they exist
 because the user asked for them.
 

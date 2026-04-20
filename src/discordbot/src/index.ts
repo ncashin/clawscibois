@@ -13,19 +13,13 @@ import { createSqliteState } from "./stateSqlite.ts";
 
 const opencode: OpenCodeConfig = loadOpenCodeConfigFromEnv();
 
-// Sessions: we keep a hot in-memory cache of threadId -> OpenCode sessionId,
-// but the authoritative record lives in OpenCode itself (sessions created
-// with title "discord:{threadId}" persist across bot restarts there). On
-// cache miss we call listSessions() to find an existing session before
-// creating a new one. The cache is populated at startup too (see primeSessionCache).
+// Hot cache. OpenCode itself is the source of truth (sessions titled
+// "discord:{threadId}" survive bot restarts); on a cache miss we do a
+// server-side lookup before creating a new session.
 const sessionByThread = new Map<string, string>();
 
-// If set, the bot will only respond to messages whose containing channel
-// matches this Discord channel ID. Users can still start Discord-native
-// threads under that channel — the chat-sdk's `thread.channelId` resolves
-// to the parent channel regardless of whether we're in the raw channel or
-// a sub-thread, so either works. Unset = respond everywhere the bot is
-// mentioned (previous behavior).
+// When set, only respond in this channel (and Discord-native threads
+// under it). Unset = respond wherever the bot is mentioned.
 const allowedChannelId = process.env.DISCORD_ALLOWED_CHANNEL_ID?.trim() || null;
 
 function log(
@@ -42,9 +36,8 @@ function log(
   console.log(line);
 }
 
-// The chat-sdk normalises Discord channel IDs to "discord:{guildId}:{channelId}".
-// Users configure a bare snowflake in DISCORD_ALLOWED_CHANNEL_ID for UX, so
-// we match against the trailing segment.
+// chat-sdk normalises Discord channel IDs to "discord:{guildId}:{channelId}".
+// Users configure the bare snowflake, so match against the trailing segment.
 function threadIsInAllowedChannel(thread: Thread): boolean {
   if (!allowedChannelId) return true;
   const parts = thread.channelId.split(":");
@@ -90,9 +83,8 @@ async function sessionForThread(threadId: string): Promise<string> {
     return existing;
   }
 
-  // Cache miss. Before creating a fresh session, ask OpenCode if one
-  // already exists for this thread — it will, if the bot has restarted
-  // mid-conversation. This preserves context across restarts.
+  // Cache miss. Ask OpenCode for an existing session first; one will
+  // be there if the bot restarted mid-conversation.
   const title = sessionTitleForThread(threadId);
   const sessions = await listSessions(opencode);
   const found = sessions.find((s) => s.title === title);
@@ -111,10 +103,8 @@ async function sessionForThread(threadId: string): Promise<string> {
   return id;
 }
 
-// Populate the session cache at startup from OpenCode's list. Not strictly
-// required — sessionForThread() would do the lookup on first miss anyway —
-// but it means the first message after a restart doesn't wait for the
-// list+match round-trip.
+// Fill the session cache from OpenCode once at startup so the first
+// message after restart doesn't pay the list+match round-trip.
 async function primeSessionCache(): Promise<void> {
   try {
     const sessions = await listSessions(opencode);
@@ -133,17 +123,16 @@ async function primeSessionCache(): Promise<void> {
       totalOpenCodeSessions: sessions.length,
     });
   } catch (err) {
-    // Non-fatal: we'll populate the cache lazily on first message.
+    // Non-fatal; sessionForThread will populate lazily on first miss.
     log("session", "primeSessionCache failed", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
 }
 
-// Chat state: persist subscriptions, locks, etc. to SQLite so they
-// survive bot restarts. Path defaults to /workspace/.chat-state/state.db
-// (which the container's entrypoint creates with app-only perms). In
-// local dev or testing, point STATE_DB_PATH somewhere writable.
+// SQLite-backed chat state so subscriptions/locks survive restart.
+// /workspace/.chat-state/state.db is created by the entrypoint with
+// app-only perms; override with STATE_DB_PATH for local dev.
 const stateDbPath =
   process.env.STATE_DB_PATH?.trim() || "/workspace/.chat-state/state.db";
 const chatState = createSqliteState({ path: stateDbPath });
@@ -222,9 +211,8 @@ chat.onSubscribedMessage(async (thread, message) => {
     });
     return;
   }
-  // Defense-in-depth: if the allowed-channel gate was added after the bot
-  // had already subscribed to threads elsewhere, we'd still be paged on
-  // follow-ups. Check here too.
+  // Defense-in-depth: subscriptions made before the channel gate was
+  // added would otherwise still route here.
   if (!threadIsInAllowedChannel(thread)) {
     log("event", "onSubscribedMessage: ignoring (outside allowed channel)", {
       threadId: thread.id,
@@ -240,26 +228,20 @@ chat.onSubscribedMessage(async (thread, message) => {
   await handlePrompt(thread, message.text);
 });
 
-// Auto-subscribe to Discord-native threads under the allowed parent
-// channel even without an initial @-mention, so conversations feel
-// natural: users spawn a thread, start typing, the bot engages.
+// Auto-subscribe sub-threads under the allowed channel without an
+// initial @-mention, so conversations flow naturally.
 //
-// The chat-sdk's only hook that fires on unsubscribed-thread messages
-// without requiring a mention is onNewMessage(regex). We use /.*/ to
-// match every message, then filter in userspace:
-//
-//   1. Must be in a Discord-native sub-thread (thread.id differs from
-//      thread.channelId). Top-level channel messages still require an
-//      explicit @-mention via onNewMention — otherwise we'd reply to
-//      every message in the allowed channel, which is loud and wrong.
-//   2. The containing (parent) channel must match DISCORD_ALLOWED_CHANNEL_ID.
-//   3. Skip mentions: onNewMention already handles those, and the SDK
-//      may invoke both handlers for a single mention.
-//   4. Skip self/bot messages.
+// onNewMessage(regex) is the only chat-sdk hook that fires on
+// unsubscribed threads without a mention. We match /.*/ and filter:
+//   - Must be a Discord sub-thread (thread.id != thread.channelId),
+//     otherwise we'd reply to every message in the allowed channel.
+//   - Must be under the allowed parent channel.
+//   - Skip mentions (onNewMention owns those; SDK may fire both).
+//   - Skip self/bot messages.
 chat.onNewMessage(/.*/, async (thread, message) => {
   if (message.author.isMe || message.author.isBot) return;
-  if (message.isMention) return; // onNewMention owns these
-  if (thread.id === thread.channelId) return; // top-level channel msg, not a thread
+  if (message.isMention) return;
+  if (thread.id === thread.channelId) return;
   if (!threadIsInAllowedChannel(thread)) return;
 
   log("event", "onNewMessage: auto-subscribing thread + handling", {

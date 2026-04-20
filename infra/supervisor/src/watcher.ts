@@ -41,7 +41,7 @@ export function createDebouncedBatcher<T>(
 
   return {
     add(item) {
-      // Silently drop after close() — the orchestrator is expected to flush()
+      // Silently drop after close(); the orchestrator is expected to flush()
       // before close() if it wants pending items committed.
       if (closed) return;
       pending.push(item);
