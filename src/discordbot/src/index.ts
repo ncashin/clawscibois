@@ -13,6 +13,14 @@ import {
 const opencode: OpenCodeConfig = loadOpenCodeConfigFromEnv();
 const sessionByThread = new Map<string, string>();
 
+// If set, the bot will only respond to messages whose containing channel
+// matches this Discord channel ID. Users can still start Discord-native
+// threads under that channel — the chat-sdk's `thread.channelId` resolves
+// to the parent channel regardless of whether we're in the raw channel or
+// a sub-thread, so either works. Unset = respond everywhere the bot is
+// mentioned (previous behavior).
+const allowedChannelId = process.env.DISCORD_ALLOWED_CHANNEL_ID?.trim() || null;
+
 function log(
   scope: string,
   msg: string,
@@ -25,6 +33,16 @@ function log(
     ...(extra ?? {}),
   });
   console.log(line);
+}
+
+// The chat-sdk normalises Discord channel IDs to "discord:{guildId}:{channelId}".
+// Users configure a bare snowflake in DISCORD_ALLOWED_CHANNEL_ID for UX, so
+// we match against the trailing segment.
+function threadIsInAllowedChannel(thread: Thread): boolean {
+  if (!allowedChannelId) return true;
+  const parts = thread.channelId.split(":");
+  const tail = parts[parts.length - 1];
+  return tail === allowedChannelId;
 }
 
 function createDiscordAdapterFromEnvironment() {
@@ -117,6 +135,14 @@ chat.onNewMention(async (thread, message) => {
     log("event", "onNewMention: ignoring self/bot", { threadId: thread.id });
     return;
   }
+  if (!threadIsInAllowedChannel(thread)) {
+    log("event", "onNewMention: ignoring (outside allowed channel)", {
+      threadId: thread.id,
+      channelId: thread.channelId,
+      allowedChannelId,
+    });
+    return;
+  }
   log("event", "onNewMention: subscribing + handling", {
     threadId: thread.id,
     authorId: message.author.id,
@@ -129,6 +155,17 @@ chat.onSubscribedMessage(async (thread, message) => {
   if (message.author.isMe || message.author.isBot) {
     log("event", "onSubscribedMessage: ignoring self/bot", {
       threadId: thread.id,
+    });
+    return;
+  }
+  // Defense-in-depth: if the allowed-channel gate was added after the bot
+  // had already subscribed to threads elsewhere, we'd still be paged on
+  // follow-ups. Check here too.
+  if (!threadIsInAllowedChannel(thread)) {
+    log("event", "onSubscribedMessage: ignoring (outside allowed channel)", {
+      threadId: thread.id,
+      channelId: thread.channelId,
+      allowedChannelId,
     });
     return;
   }
