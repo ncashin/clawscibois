@@ -1,16 +1,23 @@
-import { createMemoryState } from "@chat-adapter/state-memory";
 import { createDiscordAdapter } from "@chat-adapter/discord";
 import { Chat, type Thread } from "chat";
 import { formatDiscordReply } from "./formatDiscordReply.ts";
 import {
   createSession,
   health,
+  listSessions,
   loadOpenCodeConfigFromEnv,
   sendUserMessage,
   type OpenCodeConfig,
 } from "./opencode.ts";
+import { createSqliteState } from "./stateSqlite.ts";
 
 const opencode: OpenCodeConfig = loadOpenCodeConfigFromEnv();
+
+// Sessions: we keep a hot in-memory cache of threadId -> OpenCode sessionId,
+// but the authoritative record lives in OpenCode itself (sessions created
+// with title "discord:{threadId}" persist across bot restarts there). On
+// cache miss we call listSessions() to find an existing session before
+// creating a new one. The cache is populated at startup too (see primeSessionCache).
 const sessionByThread = new Map<string, string>();
 
 // If set, the bot will only respond to messages whose containing channel
@@ -69,27 +76,84 @@ function createDiscordAdapterFromEnvironment() {
   });
 }
 
+const SESSION_TITLE_PREFIX = "discord:";
+const sessionTitleForThread = (threadId: string) =>
+  `${SESSION_TITLE_PREFIX}${threadId}`;
+
 async function sessionForThread(threadId: string): Promise<string> {
   const existing = sessionByThread.get(threadId);
   if (existing) {
-    log("session", "reusing existing session", {
+    log("session", "reusing existing session (cache hit)", {
       threadId,
       sessionId: existing,
     });
     return existing;
   }
+
+  // Cache miss. Before creating a fresh session, ask OpenCode if one
+  // already exists for this thread — it will, if the bot has restarted
+  // mid-conversation. This preserves context across restarts.
+  const title = sessionTitleForThread(threadId);
+  const sessions = await listSessions(opencode);
+  const found = sessions.find((s) => s.title === title);
+  if (found) {
+    log("session", "reusing existing session (server lookup)", {
+      threadId,
+      sessionId: found.id,
+    });
+    sessionByThread.set(threadId, found.id);
+    return found.id;
+  }
+
   log("session", "creating new session", { threadId });
-  const id = await createSession(opencode, `discord:${threadId}`);
+  const id = await createSession(opencode, title);
   sessionByThread.set(threadId, id);
   return id;
 }
+
+// Populate the session cache at startup from OpenCode's list. Not strictly
+// required — sessionForThread() would do the lookup on first miss anyway —
+// but it means the first message after a restart doesn't wait for the
+// list+match round-trip.
+async function primeSessionCache(): Promise<void> {
+  try {
+    const sessions = await listSessions(opencode);
+    let primed = 0;
+    for (const s of sessions) {
+      if (s.title?.startsWith(SESSION_TITLE_PREFIX)) {
+        const threadId = s.title.slice(SESSION_TITLE_PREFIX.length);
+        if (threadId && !sessionByThread.has(threadId)) {
+          sessionByThread.set(threadId, s.id);
+          primed++;
+        }
+      }
+    }
+    log("session", "primed session cache", {
+      primed,
+      totalOpenCodeSessions: sessions.length,
+    });
+  } catch (err) {
+    // Non-fatal: we'll populate the cache lazily on first message.
+    log("session", "primeSessionCache failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// Chat state: persist subscriptions, locks, etc. to SQLite so they
+// survive bot restarts. Path defaults to /workspace/.chat-state/state.db
+// (which the container's entrypoint creates with app-only perms). In
+// local dev or testing, point STATE_DB_PATH somewhere writable.
+const stateDbPath =
+  process.env.STATE_DB_PATH?.trim() || "/workspace/.chat-state/state.db";
+const chatState = createSqliteState({ path: stateDbPath });
 
 const chat = new Chat({
   userName: process.env.DISCORD_BOT_USERNAME ?? "slopscibois",
   adapters: {
     discord: createDiscordAdapterFromEnvironment(),
   },
-  state: createMemoryState(),
+  state: chatState,
 });
 
 async function handlePrompt(thread: Thread, text: string): Promise<void> {
@@ -206,6 +270,7 @@ function runGatewayLoop(): void {
 
 await chat.initialize();
 await health(opencode);
+await primeSessionCache();
 
 const port = Number(process.env.PORT ?? 3001);
 
